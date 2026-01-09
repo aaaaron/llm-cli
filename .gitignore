@@ -1,0 +1,5 @@
+.llmrc
+.llm_session
+.claude
+generated_*
+coverage.out
