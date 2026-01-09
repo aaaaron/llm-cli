@@ -1,4 +1,0 @@
-To learn about quantum computing, use this command to open the Wikipedia article (assumes a graphical desktop).  
-```sh
-xdg-open 'https://en.wikipedia.org/wiki/Quantum_computing'
-```
