@@ -78,6 +78,44 @@ func handleHTTPError(resp *http.Response, providerName string) error {
 	}
 }
 
+// parseSSEStream reads an SSE stream from an io.Reader and extracts content deltas.
+// This is used by providers that implement OpenAI-compatible SSE streaming.
+func parseSSEStream(body io.Reader, onChunk func(string)) (string, error) {
+	var fullResponse string
+	reader := bufio.NewReader(body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				break
+			}
+			var event map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				continue
+			}
+			if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]interface{}); ok {
+					if delta, ok := choice["delta"].(map[string]interface{}); ok {
+						if content, ok := delta["content"].(string); ok && content != "" {
+							onChunk(content)
+							fullResponse += content
+						}
+					}
+				}
+			}
+		}
+	}
+	return fullResponse, nil
+}
+
 // handleOpenAIError wraps OpenAI library errors with user-friendly messages
 func handleOpenAIError(err error) error {
 	if err == nil {
@@ -229,39 +267,7 @@ func (p *GrokProvider) Query(model string, messages []session.Message, onChunk f
 		return "", handleHTTPError(resp, "Grok")
 	}
 
-	var fullResponse string
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				break
-			}
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-			if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
-				if choice, ok := choices[0].(map[string]interface{}); ok {
-					if delta, ok := choice["delta"].(map[string]interface{}); ok {
-						if content, ok := delta["content"].(string); ok && content != "" {
-							onChunk(content)
-							fullResponse += content
-						}
-					}
-				}
-			}
-		}
-	}
-	return fullResponse, nil
+	return parseSSEStream(resp.Body, onChunk)
 }
 
 // LMProxyProvider is the provider for lm-proxy (OpenAI-compatible proxy server).
@@ -324,39 +330,7 @@ func (p *LMProxyProvider) Query(model string, messages []session.Message, onChun
 		return "", handleHTTPError(resp, "lm-proxy")
 	}
 
-	var fullResponse string
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				break
-			}
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-			if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
-				if choice, ok := choices[0].(map[string]interface{}); ok {
-					if delta, ok := choice["delta"].(map[string]interface{}); ok {
-						if content, ok := delta["content"].(string); ok && content != "" {
-							onChunk(content)
-							fullResponse += content
-						}
-					}
-				}
-			}
-		}
-	}
-	return fullResponse, nil
+	return parseSSEStream(resp.Body, onChunk)
 }
 
 // OpenRouterProvider is the provider for OpenRouter API.
@@ -421,37 +395,5 @@ func (p *OpenRouterProvider) Query(model string, messages []session.Message, onC
 		return "", handleHTTPError(resp, "OpenRouter")
 	}
 
-	var fullResponse string
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				break
-			}
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-			if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
-				if choice, ok := choices[0].(map[string]interface{}); ok {
-					if delta, ok := choice["delta"].(map[string]interface{}); ok {
-						if content, ok := delta["content"].(string); ok && content != "" {
-							onChunk(content)
-							fullResponse += content
-						}
-					}
-				}
-			}
-		}
-	}
-	return fullResponse, nil
+	return parseSSEStream(resp.Body, onChunk)
 }
