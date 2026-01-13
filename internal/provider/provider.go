@@ -54,9 +54,9 @@ func handleHTTPError(resp *http.Response, providerName string) error {
 		return fmt.Errorf("rate limit exceeded: you've hit the API rate limit, please wait and try again")
 	case 400:
 		// Try to extract error message from response body
-		var errorData map[string]interface{}
+		var errorData map[string]any
 		if err := json.Unmarshal(body, &errorData); err == nil {
-			if errorMsg, ok := errorData["error"].(map[string]interface{}); ok {
+			if errorMsg, ok := errorData["error"].(map[string]any); ok {
 				if message, ok := errorMsg["message"].(string); ok {
 					return fmt.Errorf("bad request: %s", message)
 				}
@@ -81,7 +81,7 @@ func handleHTTPError(resp *http.Response, providerName string) error {
 // parseSSEStream reads an SSE stream from an io.Reader and extracts content deltas.
 // This is used by providers that implement OpenAI-compatible SSE streaming.
 func parseSSEStream(body io.Reader, onChunk func(string)) (string, error) {
-	var fullResponse string
+	var fullResponse strings.Builder
 	reader := bufio.NewReader(body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -92,28 +92,33 @@ func parseSSEStream(body io.Reader, onChunk func(string)) (string, error) {
 			return "", err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimSpace(data)
 			if data == "[DONE]" {
 				break
 			}
-			var event map[string]interface{}
+			var event map[string]any
 			if err := json.Unmarshal([]byte(data), &event); err != nil {
 				continue
 			}
-			if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
-				if choice, ok := choices[0].(map[string]interface{}); ok {
-					if delta, ok := choice["delta"].(map[string]interface{}); ok {
+			if choices, ok := event["choices"].([]any); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]any); ok {
+					if delta, ok := choice["delta"].(map[string]any); ok {
 						if content, ok := delta["content"].(string); ok && content != "" {
 							onChunk(content)
-							fullResponse += content
+							fullResponse.WriteString(content)
 						}
+					}
+					// Check for finish_reason to detect completion (after processing content)
+					if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
+						break
 					}
 				}
 			}
 		}
 	}
-	return fullResponse, nil
+	return fullResponse.String(), nil
 }
 
 // handleOpenAIError wraps OpenAI library errors with user-friendly messages
@@ -191,7 +196,7 @@ func (p *OpenAIProvider) Query(model string, messages []session.Message, onChunk
 	}
 	defer stream.Close()
 
-	var fullResponse string
+	var fullResponse strings.Builder
 	for {
 		response, err := stream.Recv()
 		if err != nil {
@@ -205,11 +210,11 @@ func (p *OpenAIProvider) Query(model string, messages []session.Message, onChunk
 			chunk := response.Choices[0].Delta.Content
 			if chunk != "" {
 				onChunk(chunk)
-				fullResponse += chunk
+				fullResponse.WriteString(chunk)
 			}
 		}
 	}
-	return fullResponse, nil
+	return fullResponse.String(), nil
 }
 
 // GrokProvider is the provider for xAI Grok API.
@@ -236,7 +241,7 @@ func (p *GrokProvider) Query(model string, messages []session.Message, onChunk f
 			"content": msg.Content,
 		})
 	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messages": grokMessages,
 		"model":    model,
 		"stream":   true,
@@ -297,7 +302,7 @@ func (p *LMProxyProvider) Query(model string, messages []session.Message, onChun
 			"content": msg.Content,
 		})
 	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messages": proxyMessages,
 		"model":    model,
 		"stream":   true,
@@ -358,7 +363,7 @@ func (p *OpenRouterProvider) Query(model string, messages []session.Message, onC
 			"content": msg.Content,
 		})
 	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messages": routerMessages,
 		"model":    model,
 		"stream":   true,

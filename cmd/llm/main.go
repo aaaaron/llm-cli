@@ -324,6 +324,7 @@ func main() {
 		wordCount := len(strings.Fields(accumulated))
 		s.Suffix = fmt.Sprintf(" Waiting for %s response... (%d words)", selectedModel, wordCount)
 	})
+	s.Stop() // Stop spinner before any output
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying LLM: %v\n", err)
 		os.Exit(1)
@@ -338,6 +339,5 @@ func main() {
 	}
 
 	// Handle response (this may execute commands and add their output to session)
-	responseProcessor := response.NewDefaultProcessor()
-	responseProcessor.Process(sessionManager, sess, query, resp, *outputFormat)
+	response.Handle(sessionManager, sess, query, resp, *outputFormat)
 }
