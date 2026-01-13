@@ -14,7 +14,9 @@ install:
 
 system-prompt:
 	processed_prompt=$$(cat system_prompt.md | tr -d '\n' | sed 's/\\n/\\\\n/g'); \
-	sed -i "s|^system_prompt=.*|system_prompt=$${processed_prompt}|" example.llmrc
+	grep -v '^system_prompt=' example.llmrc > example.llmrc.tmp; \
+	echo "system_prompt=$${processed_prompt}" >> example.llmrc.tmp; \
+	mv example.llmrc.tmp example.llmrc
 
 clean:
 	rm -f coverage.out
