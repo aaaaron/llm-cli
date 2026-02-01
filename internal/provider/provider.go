@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sashabaranov/go-openai"
-
 	"llm/internal/session"
 )
 
@@ -31,7 +29,7 @@ const (
 
 // Provider is the interface for LLM providers.
 type Provider interface {
-	Query(model string, messages []session.Message, onChunk func(string)) (string, error)
+	Query(model string, messages []session.Message, onChunk func(string), verbose bool) (string, error)
 }
 
 // wrapTimeoutError checks if an error is a context timeout and returns a user-friendly message
@@ -121,6 +119,32 @@ func parseSSEStream(body io.Reader, onChunk func(string)) (string, error) {
 	return fullResponse.String(), nil
 }
 
+// logVerboseRequest logs the API request details if verbose is true.
+func logVerboseRequest(verbose bool, providerName, url, model string, payload map[string]any) {
+	if !verbose {
+		return
+	}
+	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
+	headers := "Content-Type: application/json\nAuthorization: Bearer ***MASKED***"
+	fmt.Printf(`=== API Request (%s) ===
+URL: %s
+Model: %s
+Headers:
+%s
+Payload:
+%s
+
+`, providerName, url, model, headers, string(payloadJSON))
+}
+
+// logVerboseResponse logs the response status if verbose is true.
+func logVerboseResponse(verbose bool, statusCode int) {
+	if !verbose {
+		return
+	}
+	fmt.Printf("Response Status: %d OK\n\n", statusCode)
+}
+
 // handleOpenAIError wraps OpenAI library errors with user-friendly messages
 func handleOpenAIError(err error) error {
 	if err == nil {
@@ -146,75 +170,58 @@ func handleOpenAIError(err error) error {
 	return err
 }
 
-// OpenAIProvider is the provider for OpenAI API using go-openai library.
+// OpenAIProvider is the provider for OpenAI API.
 type OpenAIProvider struct {
-	client *openai.Client
+	apiKey string
 }
 
 // NewOpenAIProvider creates a new OpenAIProvider with the given API key.
 func NewOpenAIProvider(apiKey string) *OpenAIProvider {
-	client := openai.NewClient(apiKey)
-	return &OpenAIProvider{client: client}
+	return &OpenAIProvider{apiKey: apiKey}
 }
 
-// Query sends the messages to OpenAI chat completions endpoint as stream.
-// Converts Message to openai.ChatCompletionMessage, streams deltas via onChunk.
-func (p *OpenAIProvider) Query(model string, messages []session.Message, onChunk func(string)) (string, error) {
+// Query sends the messages to OpenAI chat completions endpoint as SSE stream.
+func (p *OpenAIProvider) Query(model string, messages []session.Message, onChunk func(string), verbose bool) (string, error) {
 	if model == "" {
-		model = openai.GPT3Dot5Turbo
+		model = "gpt-3.5-turbo"
 	}
-	var openaiMessages []openai.ChatCompletionMessage
+	url := "https://api.openai.com/v1/chat/completions"
+	var messagesPayload []map[string]string
 	for _, msg := range messages {
-		var role string
-		switch msg.Role {
-		case "user":
-			role = openai.ChatMessageRoleUser
-		case "assistant":
-			role = openai.ChatMessageRoleAssistant
-		case "system":
-			role = openai.ChatMessageRoleSystem
-		}
-		openaiMessages = append(openaiMessages, openai.ChatCompletionMessage{
-			Role:    role,
-			Content: msg.Content,
+		messagesPayload = append(messagesPayload, map[string]string{
+			"role":    msg.Role,
+			"content": msg.Content,
 		})
 	}
+	payload := map[string]any{
+		"messages": messagesPayload,
+		"model":    model,
+		"stream":   true,
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	logVerboseRequest(verbose, "OpenAI", url, model, payload)
 	ctx, cancel := context.WithTimeout(context.Background(), StreamingRequestTimeout)
 	defer cancel()
-
-	stream, err := p.client.CreateChatCompletionStream(
-		ctx,
-		openai.ChatCompletionRequest{
-			Model:    model,
-			Messages: openaiMessages,
-			Stream:   true,
-		},
-	)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		err = wrapTimeoutError(err, "streaming from OpenAI")
-		return "", handleOpenAIError(err)
+		return "", err
 	}
-	defer stream.Close()
-
-	var fullResponse strings.Builder
-	for {
-		response, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			err = wrapTimeoutError(err, "receiving OpenAI stream")
-			return "", handleOpenAIError(err)
-		}
-		if len(response.Choices) > 0 {
-			chunk := response.Choices[0].Delta.Content
-			if chunk != "" {
-				onChunk(chunk)
-				fullResponse.WriteString(chunk)
-			}
-		}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer " + p.apiKey)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", wrapTimeoutError(err, "connecting to OpenAI API")
 	}
-	return fullResponse.String(), nil
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", handleHTTPError(resp, "OpenAI")
+	}
+	logVerboseResponse(verbose, resp.StatusCode)
+	return parseSSEStream(resp.Body, onChunk)
 }
 
 // GrokProvider is the provider for xAI Grok API.
@@ -229,7 +236,7 @@ func NewGrokProvider(apiKey string) *GrokProvider {
 
 // Query sends messages to Grok chat completions endpoint as SSE stream.
 // Parses SSE events for content deltas.
-func (p *GrokProvider) Query(model string, messages []session.Message, onChunk func(string)) (string, error) {
+func (p *GrokProvider) Query(model string, messages []session.Message, onChunk func(string), verbose bool) (string, error) {
 	if model == "" {
 		model = "grok-3"
 	}
@@ -250,6 +257,8 @@ func (p *GrokProvider) Query(model string, messages []session.Message, onChunk f
 	if err != nil {
 		return "", err
 	}
+	logVerboseRequest(verbose, "Grok", url, model, payload)
+	logVerboseRequest(verbose, "Grok", url, model, payload)
 
 	ctx, cancel := context.WithTimeout(context.Background(), StreamingRequestTimeout)
 	defer cancel()
@@ -271,6 +280,7 @@ func (p *GrokProvider) Query(model string, messages []session.Message, onChunk f
 	if resp.StatusCode != 200 {
 		return "", handleHTTPError(resp, "Grok")
 	}
+	logVerboseResponse(verbose, resp.StatusCode)
 
 	return parseSSEStream(resp.Body, onChunk)
 }
@@ -290,7 +300,7 @@ func NewLMProxyProvider(apiKey, baseURL string) *LMProxyProvider {
 }
 
 // Query sends messages to lm-proxy chat completions endpoint as SSE stream.
-func (p *LMProxyProvider) Query(model string, messages []session.Message, onChunk func(string)) (string, error) {
+func (p *LMProxyProvider) Query(model string, messages []session.Message, onChunk func(string), verbose bool) (string, error) {
 	if model == "" {
 		model = "gpt-3.5-turbo"
 	}
@@ -311,6 +321,8 @@ func (p *LMProxyProvider) Query(model string, messages []session.Message, onChun
 	if err != nil {
 		return "", err
 	}
+	logVerboseRequest(verbose, "LMProxy", url, model, payload)
+	logVerboseRequest(verbose, "LMProxy", url, model, payload)
 
 	ctx, cancel := context.WithTimeout(context.Background(), StreamingRequestTimeout)
 	defer cancel()
@@ -334,6 +346,7 @@ func (p *LMProxyProvider) Query(model string, messages []session.Message, onChun
 	if resp.StatusCode != 200 {
 		return "", handleHTTPError(resp, "lm-proxy")
 	}
+	logVerboseResponse(verbose, resp.StatusCode)
 
 	return parseSSEStream(resp.Body, onChunk)
 }
@@ -351,7 +364,7 @@ func NewOpenRouterProvider(apiKey string) *OpenRouterProvider {
 
 // Query sends messages to OpenRouter chat completions endpoint as SSE stream.
 // Supports free mode with max_price=0 for input/output.
-func (p *OpenRouterProvider) Query(model string, messages []session.Message, onChunk func(string)) (string, error) {
+func (p *OpenRouterProvider) Query(model string, messages []session.Message, onChunk func(string), verbose bool) (string, error) {
 	if model == "" {
 		model = "openai/gpt-3.5-turbo"
 	}
@@ -378,6 +391,8 @@ func (p *OpenRouterProvider) Query(model string, messages []session.Message, onC
 	if err != nil {
 		return "", err
 	}
+	logVerboseRequest(verbose, "OpenRouter", url, model, payload)
+	logVerboseRequest(verbose, "OpenRouter", url, model, payload)
 
 	ctx, cancel := context.WithTimeout(context.Background(), StreamingRequestTimeout)
 	defer cancel()
@@ -399,6 +414,7 @@ func (p *OpenRouterProvider) Query(model string, messages []session.Message, onC
 	if resp.StatusCode != 200 {
 		return "", handleHTTPError(resp, "OpenRouter")
 	}
+	logVerboseResponse(verbose, resp.StatusCode)
 
 	return parseSSEStream(resp.Body, onChunk)
 }

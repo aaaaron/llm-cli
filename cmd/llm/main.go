@@ -41,6 +41,20 @@ type openrouterModel struct {
 	ContextLength int `json:"context_length"`
 }
 
+func verboseLog(enabled bool, format string, args ...any) {
+	if !enabled {
+		return
+	}
+	fmt.Printf("[verbose] "+format+"\n", args...)
+}
+
+func maskedValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	return "***MASKED***"
+}
+
 // Select a provider based on which one appears to have the most parameters in its filename
 func getModelParams(modelID string) float64 {
 	re := regexp.MustCompile(`(\d+(?:\.\d+)?)[bB]`)
@@ -64,6 +78,7 @@ func main() {
 		configPath   = flag.String("config", "~/.llmrc", "Path to configuration file")
 		systemPrompt = flag.String("system-prompt", "", "Override default system prompt")
 		newSession   = flag.Bool("new-session", false, "Start a new session, flushing any existing session")
+		verbose      = flag.Bool("verbose", false, "Enable verbose diagnostic output")
 	)
 
 	flag.Parse()
@@ -162,6 +177,9 @@ func main() {
 	if cfg.SystemPrompt == "" {
 		fmt.Fprintf(os.Stderr, "No system_prompt defined in configuration. Proceeding without a system message.\n")
 	}
+	verboseLog(*verbose, "Loaded config from %s", expandedConfigPath)
+	verboseLog(*verbose, "Config keys: grok_api_key=%s openai_api_key=%s openrouter_api_key=%s lm_proxy_api_key=%s", maskedValue(cfg.GrokAPIKey), maskedValue(cfg.OpenAIAPIKey), maskedValue(cfg.OpenRouterAPIKey), maskedValue(cfg.LMProxyAPIKey))
+	verboseLog(*verbose, "Config defaults: grok_model=%s openai_model=%s openrouter_model=%s lm_proxy_model=%s default_provider=%s", cfg.GrokModel, cfg.OpenAIModel, cfg.OpenRouterModel, cfg.LMProxyModel, cfg.DefaultProvider)
 
 	// Determine model
 	selectedModel := *model
@@ -171,6 +189,7 @@ func main() {
 			selectedModel = "openrouter"
 		}
 	}
+	verboseLog(*verbose, "Selected provider: %s", selectedModel)
 
 	factory := provider.NewFactory()
 	prov, queryModel, err := factory.Create(selectedModel, cfg)
@@ -178,6 +197,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+	verboseLog(*verbose, "Provider initialized. Query model: %s", queryModel)
 
 	// Load or create session
 	sessionManager := session.NewManager()
@@ -186,10 +206,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading session: %v\n", err)
 		os.Exit(1)
 	}
+	verboseLog(*verbose, "Loaded session: provider=%s messages=%d", sess.Provider, len(sess.Messages))
 
 	// Check if new session or expired
 	if *newSession || sessionManager.IsExpired(sess) || sess.Provider != selectedModel {
 		sess = sessionManager.NewSession(selectedModel)
+		verboseLog(*verbose, "Started new session for provider=%s", selectedModel)
 	}
 
 	// Add system prompt if first message
@@ -201,6 +223,7 @@ func main() {
 		if systemMsg != "" {
 			systemMsg = cli.ReplacePlaceholders(systemMsg)
 			sessionManager.AddMessage(sess, "system", systemMsg)
+			verboseLog(*verbose, "Added system prompt")
 		}
 	}
 
@@ -237,9 +260,14 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+	verboseLog(*verbose, "Captured user query (%d chars)", len(query))
 
 	// Add user message
 	sessionManager.AddMessage(sess, "user", query)
+	if *verbose {
+		promptJSON, _ := json.MarshalIndent(sessionManager.GetMessages(sess), "", "  ")
+		fmt.Printf("[verbose] Prompt messages:\n%s\n", string(promptJSON))
+	}
 
 	if selectedModel == "openrouter" && cfg.OpenRouterModel == "_free_" {
 		if cfg.OpenRouterAPIKey == "" {
@@ -256,6 +284,7 @@ func main() {
 				os.Exit(1)
 			}
 			req.Header.Set("Authorization", "Bearer "+cfg.OpenRouterAPIKey)
+			verboseLog(*verbose, "OpenRouter model discovery request: %s (Authorization: %s)", req.URL.String(), maskedValue(cfg.OpenRouterAPIKey))
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				if err == context.DeadlineExceeded {
@@ -266,6 +295,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer resp.Body.Close()
+			verboseLog(*verbose, "OpenRouter model discovery response status: %d", resp.StatusCode)
 			if resp.StatusCode != 200 {
 				body, _ := io.ReadAll(resp.Body)
 				fmt.Fprintf(os.Stderr, "API error: %s\n", string(body))
@@ -301,6 +331,7 @@ func main() {
 		}
 		queryModel = sess.OpenRouterFreeModel
 		prov.(*provider.OpenRouterProvider).FreeMode = true
+		verboseLog(*verbose, "OpenRouter free mode enabled with model %s", queryModel)
 	}
 
 	// Query LLM
@@ -323,11 +354,15 @@ func main() {
 		accumulated += chunk
 		wordCount := len(strings.Fields(accumulated))
 		s.Suffix = fmt.Sprintf(" Waiting for %s response... (%d words)", selectedModel, wordCount)
-	})
+	}, *verbose)
 	s.Stop() // Stop spinner before any output
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying LLM: %v\n", err)
 		os.Exit(1)
+	}
+	verboseLog(*verbose, "Received response (%d chars)", len(resp))
+	if *verbose {
+		fmt.Printf("[verbose] Response content:\n%s\n", resp)
 	}
 
 	// Add assistant response
@@ -340,4 +375,5 @@ func main() {
 
 	// Handle response (this may execute commands and add their output to session)
 	response.Handle(sessionManager, sess, query, resp, *outputFormat)
+	verboseLog(*verbose, "Response handling completed")
 }

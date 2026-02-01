@@ -59,7 +59,7 @@ for f in *.jpg; do mv "$f" "${f%.jpg}.png"; done
 - `--system-prompt`: Override default system prompt
 - `--session-timeout`: Set session timeout in minutes
 - `--new-session`: Start a new session, flushing any existing session
-- `--verbose`: Enable verbose output
+- `--verbose`: Enable verbose output (diagnostic steps, masked API calls, prompt/response)
 - `--quiet`: Suppress non-essential output
 - `--save-response`: Save response to specified file
 
@@ -97,4 +97,3 @@ for f in *.jpg; do mv "$f" "${f%.jpg}.png"; done
 - OpenAI
 - Grok
 - lm-proxy
-
